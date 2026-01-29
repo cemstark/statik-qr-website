@@ -59,6 +59,19 @@
           <a class="btn" href="/info" target="_blank" rel="noreferrer">/info önizleme</a>
         </div>
       </form>
+
+      <hr style="border: 0; border-top: 1px solid #1f2a44; margin: 18px 0;" />
+
+      <h3 style="margin: 0 0 10px 0;">QR Üretimi</h3>
+      <p class="muted" style="margin-top: 0;">
+        Aktif QR, siz “Yeni QR üret” demedikçe süresiz geçerli kalır.
+        Yeni QR üretilince bir önceki otomatik olarak geçersizleşir.
+      </p>
+      <form method="post" action="/admin/new_qr?token={{ token }}" onsubmit="return confirm('Yeni QR üretilecek. Eski QR geçersiz olacak. Devam?');">
+        <div class="btns">
+          <button class="btn" type="submit">Yeni QR üret</button>
+        </div>
+      </form>
     </div>
   </body>
 </html>
