@@ -23,6 +23,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "static_redirect_url": "https://statik-qr-website.onrender.com",
     # stored on host (Render) side
     "current_qr_token": "",
+    # stored on local (PC) side: stays valid until you explicitly generate a new QR
+    "active_qr_token": "",
+    # local bookkeeping: last token we successfully pushed to host via /api/rotate
+    "last_sent_qr_token": "",
     "info_title": "Bilgiler",
     "info_body": "Buraya bilgilerinizi yazın.",
     "admin_token": "",
