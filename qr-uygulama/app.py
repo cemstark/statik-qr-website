@@ -17,7 +17,6 @@ from config_store import load_config, save_config
 
 
 RUN_ID = secrets.token_urlsafe(8)
-QR_TOKEN = secrets.token_urlsafe(18)  # rotates every app start
 _SAVED_ONCE = False
 _LAST_SAVED_PATH: str | None = None
 _LAST_SAVE_ERROR: str | None = None
@@ -46,7 +45,40 @@ def _public_base_url() -> str:
     return request.url_root.rstrip("/")
 
 
+def _get_active_qr_token(cfg: dict) -> str:
+    """
+    Returns the locally-active QR token.
+    - Persists in config.json
+    - Does NOT change unless explicitly rotated (new QR generated)
+    """
+    token = str(cfg.get("active_qr_token") or "").strip()
+    if token:
+        return token
+    token = secrets.token_urlsafe(18)
+    cfg["active_qr_token"] = token
+    save_config(cfg)
+    return token
+
+
+def _rotate_active_qr_token(cfg: dict) -> str:
+    """
+    Generates a brand new QR token (invalidates previous QR on host once synced).
+    """
+    token = secrets.token_urlsafe(18)
+    cfg["active_qr_token"] = token
+    # force re-sync to host
+    cfg["last_sent_qr_token"] = ""
+    save_config(cfg)
+    return token
+
+
 def _qr_payload_url(cfg: dict) -> str:
+    # If rotation is enabled, QR should point to hosted gate endpoint (/r/<token>)
+    if cfg.get("remote_rotate_enabled"):
+        base = (cfg.get("public_base_url") or "").strip() or _public_base_url()
+        token = _get_active_qr_token(cfg)
+        return base.rstrip("/") + "/r/" + token
+
     mode = (cfg.get("qr_mode") or "info_page").strip()
 
     if mode == "target_url":
@@ -87,7 +119,8 @@ def _qr_payload_for_saved_png(cfg: dict) -> str:
         base = (cfg.get("public_base_url") or "").strip()
         if not base:
             raise RuntimeError("remote_rotate_enabled=true ama public_base_url boş. Render host URL'nizi yazın.")
-        return base.rstrip("/") + "/r/" + QR_TOKEN
+        token = _get_active_qr_token(cfg)
+        return base.rstrip("/") + "/r/" + token
 
     mode = (cfg.get("qr_mode") or "info_page").strip()
     if mode == "target_url":
@@ -188,10 +221,32 @@ def rotate_redirect(token: str):
     current = (cfg.get("current_qr_token") or "").strip()
     redirect_url = (cfg.get("static_redirect_url") or "").strip()
     if not current or not redirect_url:
-        return ("Not configured", 500)
+        return (
+            "QR henüz aktif edilmedi (Not configured).\n"
+            "Bu host'a ilk token'ı göndermek için bilgisayarındaki uygulamayı 1 kez çalıştırıp\n"
+            "remote_rotate_enabled=true iken /api/rotate çağrısını yaptırmalısın.\n",
+            410,
+            {"Content-Type": "text/plain; charset=utf-8"},
+        )
     if token != current:
         return ("QR artık geçersiz (yeni QR üretildi).", 410)
     return redirect(redirect_url, code=302)
+
+
+@app.get("/status")
+def status():
+    """
+    Small, non-sensitive health/config status endpoint.
+    Does NOT expose tokens.
+    """
+    cfg = load_config()
+    return {
+        "ok": True,
+        "app_mode": _app_mode(cfg),
+        "has_current_qr_token": bool((cfg.get("current_qr_token") or "").strip()),
+        "has_static_redirect_url": bool((cfg.get("static_redirect_url") or "").strip()),
+        "remote_rotate_enabled": bool(cfg.get("remote_rotate_enabled")),
+    }
 
 
 @app.get("/qr.png")
@@ -344,9 +399,11 @@ def sync_rotate_to_remote(cfg: dict) -> None:
     if not static_url:
         raise RuntimeError("static_redirect_url eksik.")
 
+    active = _get_active_qr_token(cfg)
+
     url = base + "/api/rotate"
     payload = {
-        "current_qr_token": QR_TOKEN,
+        "current_qr_token": active,
         "static_redirect_url": static_url,
     }
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -361,6 +418,36 @@ def sync_rotate_to_remote(cfg: dict) -> None:
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         _ = resp.read()
+    cfg["last_sent_qr_token"] = active
+    save_config(cfg)
+
+
+@app.post("/admin/new_qr")
+def admin_new_qr_post():
+    cfg = load_config()
+    if not _require_admin(cfg):
+        return ("Yetkisiz.", 401)
+    if _is_host_only(cfg):
+        return ("Not Found", 404)
+
+    # Explicitly rotate token (this is the only time we invalidate previous QR)
+    _ = _rotate_active_qr_token(cfg)
+
+    # Try to sync new token to host (if enabled)
+    try:
+        sync_rotate_to_remote(cfg)
+    except Exception:
+        # Keep going: local QR can still be saved, sync can be retried later.
+        pass
+
+    # Re-generate saved png (if enabled)
+    global _SAVED_ONCE, _LAST_SAVED_PATH, _LAST_SAVE_ERROR
+    _SAVED_ONCE = False
+    _LAST_SAVED_PATH = None
+    _LAST_SAVE_ERROR = None
+    _maybe_save_once(cfg)
+
+    return redirect(url_for("admin_get", token=cfg.get("admin_token")))
 
 
 @app.get("/admin")
@@ -395,7 +482,8 @@ def admin_post():
 if __name__ == "__main__":
     cfg = load_config()
     print("RUN_ID:", RUN_ID)
-    print("QR_TOKEN:", QR_TOKEN)
+    # Ensure we have a persistent token for the currently-active QR.
+    _ = _get_active_qr_token(cfg)
     # If desired, push the text to the hosted site so customers see it.
     try:
         sync_info_to_remote(cfg)
@@ -405,7 +493,7 @@ if __name__ == "__main__":
         if cfg.get("remote_sync_enabled"):
             print("Remote sync: FAILED:", repr(e))
 
-    # Rotate hosted gate token so old QR codes become invalid.
+    # Sync current token to hosted gate (does not rotate unless token changed).
     try:
         sync_rotate_to_remote(cfg)
         if cfg.get("remote_rotate_enabled"):
